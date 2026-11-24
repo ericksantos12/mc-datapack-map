@@ -12,6 +12,12 @@ import { ResourceLocation } from "mc-datapack-loader";
 
 const WORKER_COUNT = 4
 
+type Sample = {
+	surface: number,
+	biome: string,
+	terrain: number
+}
+
 type Tile = {
 	coords: L.Coords,
 	canvas: HTMLCanvasElement,
@@ -45,6 +51,10 @@ export class BiomeLayer extends L.GridLayer {
 
 	private generationVersion = 0
 	private waveImage: Promise<HTMLImageElement>
+
+	private exportTaskId = 0
+	private pendingUpdate: Promise<void> = Promise.resolve()
+	private exportTasks = new Map<string, { resolve: (data: { array: Sample[][], step: number }) => void, reject: (e: Error) => void }>()
 
 	constructor(options: L.GridLayerOptions, private do_hillshade: Ref<boolean>, private show_sealevel: Ref<boolean>, private project_down: Ref<boolean>, private y: Ref<number>) {
 		super(options)
@@ -179,6 +189,16 @@ export class BiomeLayer extends L.GridLayer {
 		for (let i = 0; i < WORKER_COUNT; i++) {
 			const worker = new MultiNoiseCalculator()
 			worker.onmessage = (ev) => {
+				const exportTask = this.exportTasks.get(ev.data.key)
+				if (exportTask) {
+					this.exportTasks.delete(ev.data.key)
+					if (ev.data.generationVersion < this.generationVersion) {
+						exportTask.reject(new Error("Map settings changed during export"))
+					} else {
+						exportTask.resolve({ array: ev.data.array, step: ev.data.step })
+					}
+					return
+				}
 				if (ev.data.generationVersion < this.generationVersion) {
 					return
 				}
@@ -208,6 +228,10 @@ export class BiomeLayer extends L.GridLayer {
 		this.generationVersion++
 		const update: any = { generationVersion: this.generationVersion }
 
+		this.rejectExportTasks()
+		let finishUpdate = () => { }
+		this.pendingUpdate = new Promise<void>(resolve => finishUpdate = resolve)
+
 		if (do_update.registires) {
 			update.densityFunctions = {}
 			for (const id of await this.datapackStore.composite_datapack.getIds(ResourceLocation.WORLDGEN_DENSITY_FUNCTION)) {
@@ -233,7 +257,116 @@ export class BiomeLayer extends L.GridLayer {
 			update.project_down = this.project_down.value
 		}
 
+		// the update clears the workers' task queues: tasks posted meanwhile would never be answered
+		this.rejectExportTasks()
 		this.workers.forEach(w => w.postMessage({ update }))
+		finishUpdate()
+	}
+
+	private rejectExportTasks() {
+		for (const task of this.exportTasks.values()) {
+			task.reject(new Error("Map settings changed during export"))
+		}
+		this.exportTasks.clear()
+	}
+
+	/**
+	 * Renders the biome map of an arbitrary block region into a canvas (used by the railroad PNG export).
+	 * The region is split into chunks that are computed by the same workers as the map tiles.
+	 * The biome search filter is ignored, hillshading follows the current map setting.
+	 */
+	async renderRegion(minX: number, minZ: number, maxX: number, maxZ: number, widthPx: number, heightPx: number, onProgress?: (fraction: number) => void): Promise<HTMLCanvasElement> {
+		await this.datapackLoader
+		await this.pendingUpdate
+
+		const CHUNK = 64
+		const MAX_SAMPLES = 600_000
+		// aim for ~3 output pixels per sample, but limit the total amount of work
+		let samplesX = Math.max(1, Math.ceil(widthPx / 3))
+		let samplesZ = Math.max(1, Math.ceil(heightPx / 3))
+		const factor = Math.sqrt(MAX_SAMPLES / (samplesX * samplesZ))
+		if (factor < 1) {
+			samplesX = Math.max(1, Math.floor(samplesX * factor))
+			samplesZ = Math.max(1, Math.floor(samplesZ * factor))
+		}
+		const blocksPerSample = Math.max((maxX - minX) / samplesX, (maxZ - minZ) / samplesZ)
+		samplesX = Math.ceil((maxX - minX) / blocksPerSample)
+		samplesZ = Math.ceil((maxZ - minZ) / blocksPerSample)
+		const step = blocksPerSample / 4 // worker coordinates are in quarter blocks
+
+		const canvas = document.createElement("canvas")
+		canvas.width = samplesX
+		canvas.height = samplesZ
+		const ctx = canvas.getContext("2d")!
+
+		const chunksX = Math.ceil(samplesX / CHUNK)
+		const chunksZ = Math.ceil(samplesZ / CHUNK)
+		const total = chunksX * chunksZ
+		let done = 0
+
+		const getBiomeColor = this.loadedDimensionStore.getBiomeColor
+		const do_hillshade = this.do_hillshade.value
+		const project_down = this.project_down.value
+		const yLevel = this.y.value
+
+		const jobs: Promise<void>[] = []
+		for (let cx = 0; cx < chunksX; cx++) {
+			for (let cz = 0; cz < chunksZ; cz++) {
+				const key = `export:${this.exportTaskId++}`
+				// shifted by one sample: the worker array has a one sample border used for hillshading
+				const min = L.point((minX / 4) + (cx * CHUNK - 1) * step, (minZ / 4) + (cz * CHUNK - 1) * step)
+				const max = L.point(min.x + CHUNK * step, min.y + CHUNK * step)
+				const worker = this.workers[this.next_worker_id]
+				this.next_worker_id = (this.next_worker_id + 1) % WORKER_COUNT
+
+				jobs.push(new Promise<{ array: Sample[][], step: number }>((resolve, reject) => {
+					this.exportTasks.set(key, { resolve, reject })
+					worker.postMessage({ task: { key, min, max, tileSize: CHUNK } })
+				}).then(({ array }) => {
+					const w = Math.min(CHUNK, samplesX - cx * CHUNK)
+					const h = Math.min(CHUNK, samplesZ - cz * CHUNK)
+					const image = ctx.createImageData(w, h)
+					for (let x = 0; x < w; x++) {
+						for (let z = 0; z < h; z++) {
+							const sample = array[x + 1][z + 1]
+							let hillshade = 1.0
+							const y = project_down ? Math.min(sample.surface, yLevel) : yLevel
+							const belowSurface = y < sample.surface
+							if (do_hillshade && sample.terrain < 0) {
+								hillshade = 0.15
+							} else if (do_hillshade && project_down && !belowSurface) {
+								hillshade = calculateHillshade(
+									array[x + 2][z + 1].surface - array[x][z + 1].surface,
+									array[x + 1][z + 2].surface - array[x + 1][z].surface,
+									step
+								)
+							}
+							const color = getBiomeColor(sample.biome)
+							const i = (z * w + x) * 4
+							image.data[i] = color.r * hillshade
+							image.data[i + 1] = color.g * hillshade
+							image.data[i + 2] = color.b * hillshade
+							image.data[i + 3] = 255
+						}
+					}
+					ctx.putImageData(image, cx * CHUNK, cz * CHUNK)
+					done++
+					onProgress?.(done / total)
+				}))
+			}
+		}
+
+		await Promise.all(jobs)
+
+		// scale to the requested pixel size (the region may be slightly larger due to rounding)
+		const out = document.createElement("canvas")
+		out.width = Math.round(widthPx)
+		out.height = Math.round(heightPx)
+		const outCtx = out.getContext("2d")!
+		outCtx.imageSmoothingEnabled = false
+		const scale = widthPx / (maxX - minX)
+		outCtx.drawImage(canvas, 0, 0, samplesX * blocksPerSample * scale, samplesZ * blocksPerSample * scale)
+		return out
 	}
 
 	generateTile(key: string, coords: L.Coords, worker_id: number) {

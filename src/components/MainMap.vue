@@ -3,7 +3,7 @@ import "leaflet/dist/leaflet.css";
 import L, { control } from "leaflet";
 import { BiomeLayer } from "../MapLayers/BiomeLayer";
 import { Graticule } from "../MapLayers/Graticule";
-import { onMounted, ref, watch, watchEffect } from 'vue';
+import { computed, onBeforeUnmount, onMounted, ref, watch, watchEffect } from 'vue';
 import BiomeTooltip from './BiomeTooltip.vue';
 import { BlockPos, Chunk, ChunkPos, DensityFunction, Identifier, RandomState, Structure, StructurePlacement, StructureSet, WorldgenStructure } from 'deepslate';
 import YSlider from './YSlider.vue';
@@ -15,11 +15,32 @@ import MapButton from './MapButton.vue';
 import { SpawnTarget } from '../util/SpawnTarget';
 import { useI18n } from 'vue-i18n';
 import { versionMetadata } from "../util";
+import "../railroad/railroad.css";
+import { useRailroadStore } from '../stores/useRailroadStore';
+import { RailroadEditor } from '../railroad/RailroadEditor';
+import { mapContext } from '../railroad/mapContext';
+import RailroadUi from './railroad/RailroadUi.vue';
 
 const searchStore = useSearchStore()
 const settingsStore = useSettingsStore()
 const loadedDimensionStore = useLoadedDimensionStore()
+const railroadStore = useRailroadStore()
 const i18n = useI18n()
+
+let railroadEditor: RailroadEditor | undefined
+
+// While datapacks reload (e.g. right after a seed change) these computeds can throw because the
+// noise registry is being refilled. In dev mode such a render error aborts every other pending
+// UI update, so the template only reads them through these guards.
+function safely<T>(fn: () => T, fallback: T): T {
+    try {
+        return fn()
+    } catch {
+        return fallback
+    }
+}
+const has_surface = computed(() => safely(() => loadedDimensionStore.surface_density_function !== undefined, false))
+const has_terrain = computed(() => safely(() => loadedDimensionStore.terrain_density_function !== undefined, false))
 
 let biomeLayer: BiomeLayer
 let graticule: Graticule
@@ -116,6 +137,7 @@ onMounted(() => {
     })
 
     map.addEventListener("contextmenu", async (evt: L.LeafletMouseEvent) => {
+        if (railroadEditor?.consumesContextMenu) return
         const pos = getPosition(map, evt.latlng)
         navigator.clipboard.writeText(`/execute in ${settingsStore.dimension.toString()} run tp ${pos[0].toFixed(0)} ${(pos[1] + (project_down.value ? 10 : 0)).toFixed(0)} ${pos[2].toFixed()}`)
         show_info.value = true
@@ -129,6 +151,13 @@ onMounted(() => {
 
     graticule = new Graticule()
 
+    railroadEditor = new RailroadEditor(map)
+    mapContext.map = map
+    mapContext.renderBiomeRegion = (minX, minZ, maxX, maxZ, w, h, onProgress) => biomeLayer.renderRegion(minX, minZ, maxX, maxZ, w, h, onProgress)
+    mapContext.fitToNetwork = () => railroadEditor?.fitToNetwork()
+    mapContext.flyTo = (x, z) => railroadEditor?.flyTo(x, z)
+    railroadStore.init()
+
     /*
     layer.on("tileunload", (evt) => {
         // @ts-expect-error: _tileCoordsToBounds does not exist
@@ -137,6 +166,8 @@ onMounted(() => {
     })*/
 
 });
+
+onBeforeUnmount(() => railroadEditor?.destroy())
 
 watch(i18n.locale, () => {
     zoom.setPosition(i18n.t('locale.text_direction') === 'ltr' ? 'topright' : 'topleft')
@@ -314,14 +345,16 @@ watch(searchStore.structures, () => {
         <div id="map">
         </div>
         <div class="map_options">
+            <MapButton icon="fa-train" v-model="railroadStore.open" :title="i18n.t('railroad.toggle')" />
             <Suspense>
                 <YSlider class="slider" v-model:y="y" />
             </Suspense>
-            <MapButton icon="fa-arrows-down-to-line" :disabled="loadedDimensionStore.surface_density_function === undefined" v-model="project_down" :title="i18n.t('map.setting.project')" />
-            <MapButton icon="fa-mountain-sun" :disabled="(!project_down || loadedDimensionStore.surface_density_function === undefined) && ! loadedDimensionStore.terrain_density_function" v-model="do_hillshade"  :title="i18n.t('map.setting.hillshade')" />
-            <MapButton icon="fa-water" :disabled="loadedDimensionStore.surface_density_function === undefined" v-model="show_sealevel" :title="i18n.t('map.setting.sealevel')" />
+            <MapButton icon="fa-arrows-down-to-line" :disabled="!has_surface" v-model="project_down" :title="i18n.t('map.setting.project')" />
+            <MapButton icon="fa-mountain-sun" :disabled="(!project_down || !has_surface) && !has_terrain" v-model="do_hillshade"  :title="i18n.t('map.setting.hillshade')" />
+            <MapButton icon="fa-water" :disabled="!has_surface" v-model="show_sealevel" :title="i18n.t('map.setting.sealevel')" />
             <MapButton icon="fa-table-cells" v-model="show_graticule" :title="i18n.t('map.setting.graticule')" />
         </div>
+        <RailroadUi />
     </div>
     <BiomeTooltip id="tooltip" v-if="show_tooltip" :style="{ left: tooltip_left + 'px', top: tooltip_top + 'px' }"
         :biome="tooltip_biome" :pos="tooltip_position" />
@@ -342,6 +375,7 @@ watch(searchStore.structures, () => {
             {{ i18n.t('map.info.teleport_command_copied') }}
         </div>
     </Transition>
+
 </template>
 
 <style scoped>
@@ -372,6 +406,14 @@ watch(searchStore.structures, () => {
     flex-direction: column;
     align-items: end;
     gap: 0.5rem;
+}
+
+.railroad-open .map_options {
+    right: 22.35rem;
+}
+
+.railroad-open :deep(.leaflet-right) {
+    right: 21.5rem;
 }
 
 .map_options:dir(rtl) {

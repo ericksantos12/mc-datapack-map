@@ -1,0 +1,112 @@
+/* Railroad planner: map markers (global, rendered by Leaflet divIcons) */
+
+.leaflet-marker-icon.rr-icon {
+    background: none;
+    border: none;
+}
+
+.rr-node {
+    position: absolute;
+    left: 0;
+    top: 0;
+    transform: translate(-50%, -50%);
+    box-sizing: border-box;
+    border-radius: 50%;
+    background: #ffffff;
+}
+
+.rr-station {
+    width: 15px;
+    height: 15px;
+    border: 4px solid var(--rr-color, #1d1d1b);
+}
+
+.rr-station.rr-interchange {
+    width: 19px;
+    height: 19px;
+    border: 4px solid #1d1d1b;
+}
+
+.rr-terminal {
+    width: 22px;
+    height: 22px;
+    border: 4.5px solid #1d1d1b;
+    box-shadow: inset 0 0 0 3px #ffffff, inset 0 0 0 10px var(--rr-color, #1d1d1b);
+}
+
+.rr-depot {
+    width: 19px;
+    height: 19px;
+    border-radius: 4px;
+    background: #37474f;
+    border: 2px solid #ffffff;
+    color: #ffffff;
+    font: 800 11px/1 "Segoe UI", Arial, sans-serif;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    box-shadow: 0 1px 3px rgba(0, 0, 0, 0.5);
+}
+
+.rr-waypoint {
+    width: 9px;
+    height: 9px;
+    background: #ffffff;
+    border: 2px solid rgba(29, 29, 27, 0.85);
+}
+
+.rr-selected::after,
+.rr-transfer-start::after {
+    content: '';
+    position: absolute;
+    inset: -8px;
+    border-radius: 50%;
+    border: 3px solid #ffe600;
+    box-shadow: 0 0 6px rgba(0, 0, 0, 0.5);
+}
+
+.rr-depot.rr-selected::after {
+    border-radius: 7px;
+}
+
+.rr-transfer-start::after {
+    border: 3px dashed #00b8d4;
+}
+
+.rr-label {
+    position: absolute;
+    left: 14px;
+    top: 0;
+    transform: translateY(-50%);
+    white-space: nowrap;
+    font: 700 12px/1.15 "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    color: #1d1d1b;
+    background: rgba(255, 255, 255, 0.9);
+    padding: 1px 5px;
+    border-radius: 4px;
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.35);
+    pointer-events: none;
+}
+
+.rr-label-terminal {
+    font-size: 13px;
+    font-weight: 800;
+}
+
+.rr-label-depot {
+    font-style: italic;
+    font-weight: 600;
+    color: #455a64;
+}
+
+#map.rr-tool-select {
+    cursor: default;
+}
+
+#map.rr-hover-node {
+    cursor: pointer;
+}
+
+#map.rr-tool-delete.rr-hover-node {
+    cursor: not-allowed;
+}
